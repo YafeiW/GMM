@@ -1,0 +1,141 @@
+function varargout = gmm_acc(X, K_or_centroids)
+% ============================================================
+% Expectation-Maximization iteration implementation of
+% Gaussian Mixture Model.
+%
+% PX = GMM(X, K_OR_CENTROIDS)
+% [PX MODEL] = GMM(X, K_OR_CENTROIDS)
+%
+%  - X: N-by-D data matrix.
+%   需要注意的是这里的X包括了全部训练数据
+%  - K_OR_CENTROIDS: either K indicating the number of
+%       components or a K-by-D matrix indicating the
+%       choosing of the initial K centroids.
+%
+%  - PX: N-by-K matrix indicating the probability of each
+%       component generating each point.
+%  - MODEL: a structure containing the parameters for a GMM:
+%       MODEL.Miu: a K-by-D matrix.
+%       MODEL.Sigma: a D-by-D-by-K matrix.
+%       MODEL.Pi: a 1-by-K vector.
+%    函数返回的 Px 是一个 N\times K 的矩阵，
+%    对于每一个 x_i ，我们只要取该矩阵第 i 行中最大的那个概率值
+%   所对应的那个 Component 为 x_i 所属的 cluster 就可以实现一个
+%    完整的聚类方法了。
+% ============================================================
+ 
+    threshold = 1e-15;
+    [N, D] = size(X);
+ 
+    if isscalar(K_or_centroids)
+        K = K_or_centroids;
+        % randomly pick centroids
+        % 首先随机选择了聚类中心
+        rndp = randperm(N);
+        centroids = X(rndp(1:K), :);
+    else
+        K = size(K_or_centroids, 1);
+        centroids = K_or_centroids;
+    end
+ 
+    % initial values
+    [pMiu pPi pSigma] = init_params();
+ 
+    Lprev = -inf;
+    while true
+        Px = calc_prob();%计算N(x|mu,sigma)
+ 
+        % new value for pGamma
+        pGamma = Px .* repmat(pPi, N, 1); %估计 gamma 是个N*K的矩阵
+        pGamma = pGamma ./ repmat(sum(pGamma, 2), 1, K);%对矩阵的理解真是出神入化
+ 
+        % new value for parameters of each Component
+        Nk = sum(pGamma, 1);
+        pMiu = diag(1./Nk) * pGamma' * X; %数字 *( K-by-N * N-by-D)加个括号有助理解
+        pPi = Nk/N;
+        for kk = 1:K
+            Xshift = X-repmat(pMiu(kk, :), N, 1);%x-u
+            pSigma(:, :, kk) = (Xshift' * ...
+                (diag(pGamma(:, kk)) * Xshift)) / Nk(kk);%更新sigma
+        end
+ 
+        % check for convergence
+        L = sum(log(Px*pPi'));
+        if L-Lprev < threshold
+            break;
+        end
+        Lprev = L;
+    end
+ 
+    if nargout == 1
+        varargout = {Px};
+    else
+        model = [];
+        model.Miu = pMiu;
+        model.Sigma = pSigma;
+        model.Pi = pPi;
+        varargout = {Px, model};
+    end   % 返回的模型参数
+ 
+    function [pMiu pPi pSigma] = init_params()%初始化参数
+        pMiu = centroids;% K-by-D matrix
+        pPi = zeros(1, K);%1-by-K matrix
+        pSigma = zeros(D, D, K);
+ 
+        % hard assign x to each centroids
+        distmat = repmat(sum(X.*X, 2), 1, K) + ...% X is a N-by-D data matrix.
+            repmat(sum(pMiu.*pMiu, 2)', N, 1) - ...% X->K列 U->N行 XU^T is N-by-K
+            2*X*pMiu';%计算每个点到K个中心的距离
+        [dummy labels] = min(distmat, [], 2);%找到离X最近的pMiu，[C,I] labels代表这个最小值是从那列选出来的
+ 
+        for k=1:K
+            Xk = X(labels == k, :);% Xk是所有被归到K类的X向量构成的矩阵
+            pPi(k) = size(Xk, 1)/N;% 数一数几个归到K类的
+            pSigma(:, :, k) = cov(Xk);%计算协方差矩阵，D-by-D matrix,最小方差无偏估计
+        end
+    end
+ 
+    function Px = calc_prob()
+        Px = zeros(N, K);
+        for k = 1:K
+            Xshift = X-repmat(pMiu(k, :), N, 1);%x-u
+            lemda=1e-5;
+            conv=pSigma(:, :, k)+lemda*diag(diag(ones(D))); %这里处理singular问题，为协方差矩阵加上一个很小lemda*I
+            inv_pSigma = inv(conv); %协方差的逆
+            tmp = sum((Xshift*inv_pSigma) .* Xshift, 2); %(X-U_k)sigma.*(X-U_k),tmp是个N*1的向量
+            coef = (2*pi)^(-D/2) * sqrt(det(inv_pSigma)); %前面的参数
+            Px(:, k) = coef * exp(-0.5*tmp); %把数据点 x 带入到 Gaussian model 里得到的值
+        end
+    end
+%% 聚类结果
+[Px,model]=gmm(X,K);%这里得到结果
+[~,belong]=max(Px,[],2)%这里的2表示按行选概率最大的那个数，输出聚类结果
+% 通过belong矩阵可计算准确性
+z=zeros(size(X,1),3);
+Label = xlsread('Label.xlsx'); %导入训练数据的标签
+%% 求准确性
+Accuracy = cal_accuracy(belong, Label)
+    function [acc] = cal_accuracy(gnd,estimate_label)
+        res = bestMap(gnd,estimate_label);
+        acc = length(find(gnd == res))/length(gnd);
+    end
+
+%% 以下绘图
+if isscalar(K)%获得类别个数
+      K_number=K;
+else
+      K_number = size(K, 1);
+end
+for k=1:K_number
+    color=[rand rand rand];     %建立颜色矩阵，随机给个颜色
+    csize=size(z(belong==k,:),1);    %数一数有几行
+    z(belong==k,:)=repmat(color,csize,1);    %对属于某一类下的点染色
+end
+ %3维概率情况的情况
+    figure('color','w');%把背景改成白的
+    scatter3(Px(:,1),Px(:,2),Px(:,3),30,z,'filled')
+end
+%repmat 通过拓展向量到矩阵
+%inv 求逆
+%X(labels == k, : ) 对行做筛选
+%scatter 对二维向量绘图
